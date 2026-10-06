@@ -2136,18 +2136,38 @@ function escapeXml(s){
    Office chart object, not a picture) ---- */
 const XLSX_HEADERS = ["Date","Time","Loco ID","Avg Speed","MODE_SUB","Traffic Dir","Cur Station ID","ABS Loc","Rad1 RSSI","Rad2 RSSI","Rad1 RSSI (-)","Rad2 RSSI (-)"];
 
-function buildSheetXml(rows){
-  const lastCol = colLetter(XLSX_HEADERS.length-1);
-  const lastRow = rows.length+1;
+/* Entry / Center / Exit helper table (columns N:P). Each border line is two points
+   (x,x) / (yMin,yMax) that the Excel chart reads from these cells. Excel-only. */
+const BORDER_TBL_FIRST_COL = 13;            // N (0-based)
+function borderTableRows(bt){
+  // returns { rowNumber: cellsXml } for rows 1..7
+  const out = {};
+  const c = k => colLetter(BORDER_TBL_FIRST_COL+k);
+  const str = (ref,t,s) => `<c r="${ref}" t="inlineStr"${s?` s="${s}"`:''}><is><t xml:space="preserve">${escapeXml(t)}</t></is></c>`;
+  const num = (ref,v) => `<c r="${ref}"><v>${v}</v></c>`;
+  out[1] = str(c(0)+'1','Border line',1) + str(c(1)+'1','ABS Loc (m)',1) + str(c(2)+'1','RSSI (dBm)',1);
+  const defs = [['Entry',bt.b.entry],['Center',bt.b.center],['Exit',bt.b.exit]];
+  defs.forEach((d,i)=>{
+    const r1 = 2+i*2, r2 = r1+1;
+    out[r1] = str(c(0)+r1,d[0]) + num(c(1)+r1,d[1]) + num(c(2)+r1,bt.yMin);
+    out[r2] = str(c(0)+r2,d[0]) + num(c(1)+r2,d[1]) + num(c(2)+r2,bt.yMax);
+  });
+  return out;
+}
+
+function buildSheetXml(rows, bt){
+  const extra = bt ? borderTableRows(bt) : {};
+  const lastCol = colLetter(bt ? BORDER_TBL_FIRST_COL+2 : XLSX_HEADERS.length-1);
+  const lastRow = Math.max(rows.length+1, bt ? 7 : 0);
   const parts = [];
   parts.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
   parts.push('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">');
   parts.push(`<dimension ref="A1:${lastCol}${lastRow}"/>`);
   parts.push('<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>');
   parts.push('<sheetFormatPr defaultRowHeight="15"/>');
-  parts.push('<cols>' + XLSX_HEADERS.map((h,i)=>`<col min="${i+1}" max="${i+1}" width="15" customWidth="1"/>`).join('') + '</cols>');
+  parts.push('<cols>' + XLSX_HEADERS.map((h,i)=>`<col min="${i+1}" max="${i+1}" width="15" customWidth="1"/>`).join('') + (bt ? `<col min="${BORDER_TBL_FIRST_COL+1}" max="${BORDER_TBL_FIRST_COL+3}" width="15" customWidth="1"/>` : '') + '</cols>');
   parts.push('<sheetData>');
-  parts.push('<row r="1">' + XLSX_HEADERS.map((h,i)=>`<c r="${colLetter(i)}1" t="inlineStr" s="1"><is><t xml:space="preserve">${escapeXml(h)}</t></is></c>`).join('') + '</row>');
+  parts.push('<row r="1">' + XLSX_HEADERS.map((h,i)=>`<c r="${colLetter(i)}1" t="inlineStr" s="1"><is><t xml:space="preserve">${escapeXml(h)}</t></is></c>`).join('') + (extra[1]||'') + '</row>');
   for(let i=0;i<rows.length;i++){
     const r = rows[i];
     const rn = i+2;
@@ -2162,7 +2182,10 @@ function buildSheetXml(rows){
         cells += `<c r="${ref}"><v>${isFinite(num)?num:0}</v></c>`;
       }
     }
-    parts.push(`<row r="${rn}">${cells}</row>`);
+    parts.push(`<row r="${rn}">${cells}${extra[rn]||''}</row>`);
+  }
+  for(let rn = rows.length+2; rn <= lastRow; rn++){   // short data sets: keep the border table rows
+    if(extra[rn]) parts.push(`<row r="${rn}">${extra[rn]}</row>`);
   }
   parts.push('</sheetData>');
   parts.push('<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>');
@@ -2190,6 +2213,23 @@ function buildSeries(idx, name, colorHex, xColLetter, yColLetter, firstRow, last
     + `<c:yVal><c:numRef><c:f>${yRef}</c:f>${buildNumCache(yVals)}</c:numRef></c:yVal>`
     + `<c:smooth val="0"/></c:ser>`;
 }
+function buildBorderSeries(idx, name, colorHex, firstRow){
+  const xRef = `Data!$${colLetter(BORDER_TBL_FIRST_COL+1)}$${firstRow}:$${colLetter(BORDER_TBL_FIRST_COL+1)}$${firstRow+1}`;
+  const yRef = `Data!$${colLetter(BORDER_TBL_FIRST_COL+2)}$${firstRow}:$${colLetter(BORDER_TBL_FIRST_COL+2)}$${firstRow+1}`;
+  const flags = (ser) => `<c:showLegendKey val="0"/><c:showVal val="0"/><c:showCatName val="0"/><c:showSerName val="${ser}"/><c:showPercent val="0"/><c:showBubbleSize val="0"/>`;
+  // the name label sits on the top point of the line, in the line colour
+  const dLbls = `<c:dLbls><c:dLbl><c:idx val="1"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>`
+    + `<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1000" b="1"><a:solidFill><a:srgbClr val="${colorHex}"/></a:solidFill></a:defRPr></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr>`
+    + `<c:dLblPos val="r"/>${flags(1)}</c:dLbl>${flags(0)}</c:dLbls>`;
+  return `<c:ser><c:idx val="${idx}"/><c:order val="${idx}"/>`
+    + `<c:tx><c:v>${escapeXml(name)}</c:v></c:tx>`
+    + `<c:spPr><a:ln w="28575" cap="flat"><a:solidFill><a:srgbClr val="${colorHex}"/></a:solidFill><a:prstDash val="solid"/></a:ln></c:spPr>`
+    + `<c:marker><c:symbol val="none"/></c:marker>`
+    + dLbls
+    + `<c:xVal><c:numRef><c:f>${xRef}</c:f></c:numRef></c:xVal>`
+    + `<c:yVal><c:numRef><c:f>${yRef}</c:f></c:numRef></c:yVal>`
+    + `<c:smooth val="0"/></c:ser>`;
+}
 function buildSeriesLiteral(idx, name, colorHex, xVals, yVals, dashed){
   const xLit = xVals.map((v,i)=>`<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join('');
   const yLit = yVals.map((v,i)=>`<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join('');
@@ -2213,14 +2253,18 @@ function buildChartXml(seriesXml, titleStr, xMin, xMax, yMin, yMax){
   + '<c:axId val="111111111"/><c:axId val="222222222"/></c:scatterChart>'
   + '<c:valAx><c:axId val="111111111"/><c:scaling><c:orientation val="minMax"/><c:max val="' + xMax + '"/><c:min val="' + xMin + '"/></c:scaling><c:delete val="0"/><c:axPos val="b"/>'
   + '<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Absolute Location(m)</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title>'
-  + '<c:numFmt formatCode="General" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="222222222"/></c:valAx>'
+  + '<c:numFmt formatCode="#,##0" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="222222222"/><c:crosses val="min"/></c:valAx>'
   + '<c:valAx><c:axId val="222222222"/><c:scaling><c:orientation val="minMax"/><c:max val="' + yMax + '"/><c:min val="' + yMin + '"/></c:scaling><c:delete val="0"/><c:axPos val="l"/>'
+  + '<c:majorGridlines><c:spPr><a:ln w="9525" cap="flat"><a:solidFill><a:srgbClr val="BFBFBF"/></a:solidFill><a:prstDash val="solid"/></a:ln></c:spPr></c:majorGridlines>'
   + '<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Rad RSSI(dBm)</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title>'
-  + '<c:numFmt formatCode="General" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="111111111"/></c:valAx>'
+  + '<c:numFmt formatCode="0" sourceLinked="0"/><c:majorTickMark val="out"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="111111111"/><c:crosses val="min"/></c:valAx>'
+  + '<c:spPr><a:noFill/><a:ln w="12700"><a:solidFill><a:srgbClr val="595959"/></a:solidFill></a:ln></c:spPr>'   // plot-area border
   + '</c:plotArea>'
   + '<c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend>'
   + '<c:plotVisOnly val="1"/>'
-  + '</c:chart></c:chartSpace>';
+  + '</c:chart>'
+  + '<c:spPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="595959"/></a:solidFill></a:ln></c:spPr>'   // chart-area border
+  + '</c:chartSpace>';
 }
 
 const XLSX_CONTENT_TYPES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>';
@@ -2230,7 +2274,7 @@ const XLSX_WORKBOOK_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes
 const XLSX_STYLES = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font><font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles><dxfs count="0"/><tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/></styleSheet>';
 const XLSX_THEME = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="5B9BD8"/></a:accent1><a:accent2><a:srgbClr val="ED7D31"/></a:accent2><a:accent3><a:srgbClr val="A5A5A5"/></a:accent3><a:accent4><a:srgbClr val="FFC000"/></a:accent4><a:accent5><a:srgbClr val="4472C4"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri Light"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>';
 const XLSX_SHEET_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>';
-const XLSX_DRAWING = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:from><xdr:col>13</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>30</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>36</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Rad RSSI Chart"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>';
+const XLSX_DRAWING = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:from><xdr:col>17</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>34</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>36</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Rad RSSI Chart"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>';
 const XLSX_DRAWING_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>';
 function xlsxCoreXml(title){
   const now = new Date().toISOString();
@@ -2248,13 +2292,13 @@ async function buildXlsxBlob(rows, meta){
   seriesXml += buildSeriesLiteral(idx++, '-70 dBm threshold', '4FB273', [xMin,xMax], [-70,-70], false);
   if(meta.border){
     const b = meta.border;
-    seriesXml += buildSeriesLiteral(idx++, 'Entry', '5B9BD8', [b.entry,b.entry], [yMin,yMax], true);
-    seriesXml += buildSeriesLiteral(idx++, 'Center', '5B9BD8', [b.center,b.center], [yMin,yMax], true);
-    seriesXml += buildSeriesLiteral(idx++, 'Exit', '5B9BD8', [b.exit,b.exit], [yMin,yMax], true);
+    seriesXml += buildBorderSeries(idx++, 'Entry', '5B9BD8', 2);
+    seriesXml += buildBorderSeries(idx++, 'Center', '5B9BD8', 4);
+    seriesXml += buildBorderSeries(idx++, 'Exit', '5B9BD8', 6);
   }
 
   const chartXml = buildChartXml(seriesXml, meta.titleStr, xMin, xMax, yMin, yMax);
-  const sheetXml = buildSheetXml(rows);
+  const sheetXml = buildSheetXml(rows, meta.border ? { b: meta.border, yMin, yMax } : null);
 
   const zip = new JSZip();
   zip.file('[Content_Types].xml', XLSX_CONTENT_TYPES);
@@ -2265,7 +2309,7 @@ async function buildXlsxBlob(rows, meta){
   zip.file('xl/_rels/workbook.xml.rels', XLSX_WORKBOOK_RELS);
   zip.file('xl/styles.xml', XLSX_STYLES);
   zip.file('xl/theme/theme1.xml', XLSX_THEME);
-  zip.file('xl/worksheets/sheet1.xml', sheetXml);
+  zip.file('xl/worksheets/sheet1.xml', sheetXml);Data Proccessing Software
   zip.file('xl/worksheets/_rels/sheet1.xml.rels', XLSX_SHEET_RELS);
   zip.file('xl/drawings/drawing1.xml', XLSX_DRAWING);
   zip.file('xl/drawings/_rels/drawing1.xml.rels', XLSX_DRAWING_RELS);
